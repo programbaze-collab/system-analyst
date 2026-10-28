@@ -1,0 +1,407 @@
+openapi: 3.0.3
+info:
+  title: API обмена данными между 1С и интернет-магазином
+  version: 1.0.0
+  description: |
+    Приём пакетов с товарами, ценами и остатками из 1С и журнал обмена.
+    Описание к ТЗ «Обмен товарами, ценами и остатками между интернет-магазином и 1С» (раздел 7).
+
+    Основные правила:
+    - 1С отправляет пакеты не чаще 60 в минуту, в пакете не более 1000 товаров.
+    - Повторная отправка пакета с тем же `packageId` не меняет данные: сайт возвращает ответ первой обработки.
+    - Ошибка в одной позиции не отменяет остальные: пакет обрабатывается частично, ошибки приходят в ответе.
+  contact:
+    name: Максим Макаров
+    url: https://t.me/programbaze
+
+servers:
+  - url: https://shop.example.ru/api/v1
+    description: Рабочий сервер
+  - url: https://test.shop.example.ru/api/v1
+    description: Тестовый стенд
+
+tags:
+  - name: Обмен
+    description: Приём данных от 1С
+  - name: Журнал
+    description: Просмотр результатов обмена
+
+security:
+  - bearerAuth: []
+
+paths:
+  /exchange/packages:
+    post:
+      tags: [Обмен]
+      operationId: sendPackage
+      summary: Принять пакет изменений
+      description: |
+        `delta` — только изменившиеся товары, отправляется раз в 5 минут.
+        `full` — полная выгрузка остатков для ночной сверки в 03:00.
+
+        Массив `stocks` передаётся по товару целиком: склад, которого нет в списке, считается пустым.
+        Сайт не заменяет данные товара, если в пакете `updatedAt` старше, чем уже сохранённый.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Package'
+            examples:
+              delta:
+                summary: Пакет изменений
+                value:
+                  packageId: 7f3c1e2a-0b9d-4c51-9a8e-2d4f6b1c0e77
+                  type: delta
+                  createdAt: '2026-10-27T10:15:00+03:00'
+                  products:
+                    - id: 84DF819C-9220-11E2-8716-0015179B1A7D
+                      article: 01-089
+                      brandId: FEBI
+                      name: Антифриз G11, 1,5 л
+                      unit: шт
+                      multiplicity: 1
+                      active: true
+                      updatedAt: '2026-10-27T10:12:41+03:00'
+                      stocks:
+                        - warehouseId: MSK-1
+                          quantity: 120
+                          price: 1082.00
+                          shipmentDate: '2026-10-29'
+                        - warehouseId: BRN-1
+                          quantity: 0
+                          price: 1082.00
+      responses:
+        '200':
+          description: Пакет обработан, в том числе повторно или частично
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageResult'
+              examples:
+                partial:
+                  summary: Две позиции с ошибками
+                  value:
+                    packageId: 7f3c1e2a-0b9d-4c51-9a8e-2d4f6b1c0e77
+                    status: processed
+                    accepted: 998
+                    rejected: 2
+                    errors:
+                      - productId: 2B6BB13A-3A1E-4A7E-A2D4-3A8123E7C221
+                        code: INVALID_PRICE
+                        message: Цена должна быть больше 0
+                      - productId: 5BB27C91-FAF7-4CED-ABB7-A267C6F98AFE
+                        code: UNKNOWN_WAREHOUSE
+                        message: Склада SPB-9 нет в справочнике сайта
+        '400':
+          description: Неверная структура пакета или в нём больше 1000 товаров. 1С не повторяет запрос.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: TOO_MANY_PRODUCTS
+                message: В пакете 1250 товаров, допустимо не более 1000
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '429':
+          $ref: '#/components/responses/TooManyRequests'
+        '503':
+          description: Сайт временно недоступен. 1С повторяет тот же пакет через 1, 5 и 15 минут.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: SERVICE_UNAVAILABLE
+                message: Сервис временно недоступен
+
+    get:
+      tags: [Журнал]
+      operationId: listPackages
+      summary: Получить журнал обмена
+      description: Список пакетов с итогами обработки, новые первыми, по 50 на страницу.
+      parameters:
+        - name: from
+          in: query
+          description: Дата начала периода включительно
+          schema:
+            type: string
+            format: date
+          example: '2026-10-27'
+        - name: to
+          in: query
+          description: Дата конца периода включительно
+          schema:
+            type: string
+            format: date
+        - name: source
+          in: query
+          description: Источник данных
+          schema:
+            type: string
+            enum: [1c, supplier]
+        - name: status
+          in: query
+          description: '`with_errors` — только пакеты, в которых есть отклонённые позиции'
+          schema:
+            type: string
+            enum: [all, with_errors]
+            default: all
+        - name: page
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+      responses:
+        '200':
+          description: Страница журнала
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageLogPage'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /exchange/packages/{packageId}:
+    get:
+      tags: [Журнал]
+      operationId: getPackage
+      summary: Получить результат обработки пакета
+      description: Тот же ответ, что сайт вернул при обработке пакета, вместе со списком ошибок.
+      parameters:
+        - name: packageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Результат обработки
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PackageResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          description: Пакет с таким идентификатором не приходил
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+              example:
+                code: PACKAGE_NOT_FOUND
+                message: Пакет не найден
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: Токен выдаётся для сервера 1С. Доступ к методам обмена открыт только с IP-адресов сервера 1С.
+
+  responses:
+    Unauthorized:
+      description: Нет токена или он неверный. 1С не повторяет запрос и сообщает ответственному.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: UNAUTHORIZED
+            message: Неверный токен
+    TooManyRequests:
+      description: Превышен лимит 60 пакетов в минуту. 1С повторяет запрос через время из заголовка Retry-After.
+      headers:
+        Retry-After:
+          description: Через сколько секунд можно повторить запрос
+          schema:
+            type: integer
+          example: 30
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            code: RATE_LIMIT
+            message: Слишком много запросов
+
+  schemas:
+    Package:
+      type: object
+      required: [packageId, type, createdAt, products]
+      properties:
+        packageId:
+          type: string
+          format: uuid
+          description: Идентификатор пакета. По нему сайт распознаёт повторную отправку.
+        type:
+          type: string
+          enum: [delta, full]
+          description: '`delta` — изменения, `full` — полная выгрузка для сверки'
+        createdAt:
+          type: string
+          format: date-time
+          description: Когда пакет сформирован в 1С
+        products:
+          type: array
+          minItems: 1
+          maxItems: 1000
+          items:
+            $ref: '#/components/schemas/Product'
+
+    Product:
+      type: object
+      required: [id, article, brandId, name, unit, multiplicity, active, updatedAt, stocks]
+      properties:
+        id:
+          type: string
+          description: Код товара в 1С (GUID)
+          example: 84DF819C-9220-11E2-8716-0015179B1A7D
+        article:
+          type: string
+          description: Артикул, как в 1С. Сайт сам приводит его к единому виду для сопоставления.
+          example: 01-089
+        brandId:
+          type: string
+          description: Код производителя из справочника
+          example: FEBI
+        name:
+          type: string
+          maxLength: 255
+        unit:
+          type: string
+          description: Единица измерения
+          example: шт
+        multiplicity:
+          type: integer
+          minimum: 1
+          description: Кратность заказа
+        active:
+          type: boolean
+          description: '`false` — товар снят с продажи: скрывается с сайта, но не удаляется'
+        updatedAt:
+          type: string
+          format: date-time
+          description: Когда товар менялся в 1С. Защищает от старых пакетов, пришедших позже новых.
+        stocks:
+          type: array
+          description: Все склады товара. Склад, которого нет в списке, считается пустым.
+          items:
+            $ref: '#/components/schemas/Stock'
+
+    Stock:
+      type: object
+      required: [warehouseId, quantity, price]
+      properties:
+        warehouseId:
+          type: string
+          description: Код склада из справочника сайта
+          example: MSK-1
+        quantity:
+          type: integer
+          minimum: 0
+          description: Остаток, шт
+        price:
+          type: number
+          format: double
+          minimum: 0.01
+          description: Цена продажи, ₽ с НДС, два знака после запятой
+          example: 1082.00
+        shipmentDate:
+          type: string
+          format: date
+          description: Ближайшая дата отгрузки со склада
+
+    PackageResult:
+      type: object
+      required: [packageId, status, accepted, rejected, errors]
+      properties:
+        packageId:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [processed]
+          description: Пакет обработан полностью или частично
+        accepted:
+          type: integer
+          minimum: 0
+          description: Сколько товаров применено
+        rejected:
+          type: integer
+          minimum: 0
+          description: Сколько товаров отклонено
+        errors:
+          type: array
+          items:
+            $ref: '#/components/schemas/ItemError'
+
+    ItemError:
+      type: object
+      required: [productId, code, message]
+      properties:
+        productId:
+          type: string
+          description: Код товара в 1С
+        code:
+          type: string
+          enum: [REQUIRED_FIELD, INVALID_PRICE, INVALID_QUANTITY, UNKNOWN_WAREHOUSE, UNKNOWN_BRAND]
+          description: |
+            - `REQUIRED_FIELD` — не заполнено обязательное поле
+            - `INVALID_PRICE` — цена меньше или равна 0
+            - `INVALID_QUANTITY` — остаток меньше 0 или не целое число
+            - `UNKNOWN_WAREHOUSE` — склада нет в справочнике сайта
+            - `UNKNOWN_BRAND` — производителя нет в справочнике сайта
+        message:
+          type: string
+          description: Пояснение для человека
+
+    PackageLogItem:
+      type: object
+      required: [packageId, source, type, receivedAt, accepted, rejected]
+      properties:
+        packageId:
+          type: string
+          format: uuid
+        source:
+          type: string
+          enum: [1c, supplier]
+        type:
+          type: string
+          enum: [delta, full, price_list]
+        receivedAt:
+          type: string
+          format: date-time
+        accepted:
+          type: integer
+        rejected:
+          type: integer
+
+    PackageLogPage:
+      type: object
+      required: [items, page, totalPages]
+      properties:
+        items:
+          type: array
+          maxItems: 50
+          items:
+            $ref: '#/components/schemas/PackageLogItem'
+        page:
+          type: integer
+        totalPages:
+          type: integer
+
+    Error:
+      type: object
+      required: [code, message]
+      properties:
+        code:
+          type: string
+          description: Машиночитаемый код ошибки
+        message:
+          type: string
+          description: Пояснение для человека

@@ -175,6 +175,7 @@ flowchart TB
       "unit": "шт",
       "multiplicity": 1,
       "active": true,
+      "updatedAt": "2026-10-27T10:12:41+03:00",
       "stocks": [
         { "warehouseId": "MSK-1", "quantity": 120, "price": 1082.00, "shipmentDate": "2026-10-29" },
         { "warehouseId": "BRN-1", "quantity": 0, "price": 1082.00 }
@@ -225,6 +226,8 @@ flowchart TB
 | UNKNOWN_BRAND | Производителя нет в справочнике сайта |
 
 Метод для журнала (ФТ-13): **`GET /api/v1/exchange/packages?from=2026-10-27&source=1c&status=with_errors`** — список пакетов с итогами, по 50 на страницу.
+
+Полное описание API в формате OpenAPI: [openapi/exchange-api.yaml](../openapi/exchange-api.yaml).
 
 ## 8. Ошибки и расхождения
 
